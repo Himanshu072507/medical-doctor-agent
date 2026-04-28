@@ -1,10 +1,12 @@
 """
-Run rule-based evals against the medical triage agent's SYSTEM_PROMPT.
+Run rule-based evals against the symptom triage agent's SYSTEM_PROMPT.
 
 Usage:
     python -m evals.run
-    # or with a different model:
+    # cheaper/faster:
     EVAL_MODEL=llama-3.1-8b-instant python -m evals.run
+    # multiple runs to detect flake:
+    EVAL_RUNS=3 python -m evals.run
 
 Reads GROQ_API_KEY from .env or shell.
 """
@@ -18,7 +20,12 @@ from pathlib import Path
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-from evals._shared import get_groq_client, load_env, with_retry  # noqa: E402
+from evals._shared import (  # noqa: E402
+    get_groq_client,
+    load_env,
+    parse_sections,
+    with_retry,
+)
 
 load_env()
 
@@ -27,8 +34,9 @@ from evals.cases import CASES  # noqa: E402
 
 
 MODEL = os.getenv("EVAL_MODEL", "llama-3.3-70b-versatile")
-TEMPERATURE = float(os.getenv("EVAL_TEMPERATURE", "0.4"))
+TEMPERATURE = float(os.getenv("EVAL_TEMPERATURE", "0.0"))  # deterministic by default
 MAX_TOKENS = int(os.getenv("EVAL_MAX_TOKENS", "2048"))
+RUNS = int(os.getenv("EVAL_RUNS", "1"))
 SAVE_DIR = ROOT / "evals" / "outputs"
 
 
@@ -49,31 +57,43 @@ def call_model(client, prompt):
 
 def score(text, case):
     failures = []
+    sections = parse_sections(text)
+
     for pattern in case.get("must_include", []):
         if not re.search(pattern, text, re.IGNORECASE):
             failures.append(f"missing: /{pattern}/")
     for pattern in case.get("must_exclude", []):
         if re.search(pattern, text, re.IGNORECASE):
-            failures.append(f"unexpected match: /{pattern}/")
+            failures.append(f"unexpected: /{pattern}/")
+
+    for sec_num, patterns in (case.get("must_include_in_section") or {}).items():
+        body = sections.get(sec_num, "")
+        for pattern in patterns:
+            if not re.search(pattern, body, re.IGNORECASE):
+                failures.append(f"section {sec_num} missing: /{pattern}/")
+
+    for sec_num, patterns in (case.get("must_exclude_in_section") or {}).items():
+        body = sections.get(sec_num, "")
+        for pattern in patterns:
+            if re.search(pattern, body, re.IGNORECASE):
+                failures.append(f"section {sec_num} unexpected: /{pattern}/")
+
     return failures
 
 
-def main():
-    client = get_groq_client()
+def run_once(client, run_id):
     SAVE_DIR.mkdir(exist_ok=True)
-
-    print(f"Running {len(CASES)} eval cases on model: {MODEL}\n")
     results = []
-    t0 = time.time()
-
     for i, case in enumerate(CASES, 1):
         name = case["name"]
         print(f"  [{i:>2}/{len(CASES)}] {name:<38}", end=" ", flush=True)
         try:
             text = call_model(client, case["prompt"])
             failures = score(text, case)
-            (SAVE_DIR / f"{name}.md").write_text(
-                f"# {name}\n\n## Prompt\n{case['prompt']}\n\n## Response\n{text}\n"
+            suffix = f"_run{run_id}" if RUNS > 1 else ""
+            (SAVE_DIR / f"{name}{suffix}.md").write_text(
+                f"# {name} (run {run_id})\n\n## Prompt\n{case['prompt']}\n\n"
+                f"## Response\n{text}\n"
             )
             status = "PASS" if not failures else f"FAIL ({len(failures)})"
             print(status)
@@ -81,24 +101,52 @@ def main():
         except Exception as e:
             print(f"ERROR: {e}")
             results.append((name, [f"exception: {e}"]))
+    return results
+
+
+def main():
+    client = get_groq_client()
+    print(f"Model: {MODEL} | temperature: {TEMPERATURE} | runs: {RUNS}\n")
+
+    t0 = time.time()
+    pass_counts = {c["name"]: 0 for c in CASES}
+    last_failures = {}
+    for r in range(1, RUNS + 1):
+        if RUNS > 1:
+            print(f"── Run {r}/{RUNS} ──")
+        results = run_once(client, r)
+        for name, failures in results:
+            if not failures:
+                pass_counts[name] += 1
+            else:
+                last_failures[name] = failures
+        if RUNS > 1:
+            print()
 
     elapsed = time.time() - t0
-    passed = sum(1 for _, f in results if not f)
-    total = len(results)
+    total = len(CASES)
+    fully_passed = sum(1 for n in pass_counts if pass_counts[n] == RUNS)
 
-    print("\n" + "─" * 70)
-    print(f"Result: {passed}/{total} passed in {elapsed:.1f}s\n")
+    print("─" * 70)
+    print(f"Result: {fully_passed}/{total} passed all {RUNS} run(s) in {elapsed:.1f}s\n")
+    if RUNS > 1:
+        print("Pass rate per case:")
+        for name in pass_counts:
+            rate = pass_counts[name] / RUNS
+            tag = "✓" if rate == 1.0 else "⚠" if rate >= 0.5 else "✗"
+            print(f"  {tag} {name:<38}  {pass_counts[name]}/{RUNS}")
+        print()
 
-    if passed < total:
-        print("Failures:\n")
-        for name, failures in results:
-            if failures:
+    if fully_passed < total:
+        print("Failures (most recent run):")
+        for name, failures in last_failures.items():
+            if pass_counts[name] < RUNS:
                 print(f"  ✗ {name}")
                 for f in failures:
                     print(f"      {f}")
                 print(f"      see: evals/outputs/{name}.md\n")
 
-    sys.exit(0 if passed == total else 1)
+    sys.exit(0 if fully_passed == total else 1)
 
 
 if __name__ == "__main__":
