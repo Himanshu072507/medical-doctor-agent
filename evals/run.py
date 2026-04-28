@@ -2,10 +2,11 @@
 Run rule-based evals against the medical triage agent's SYSTEM_PROMPT.
 
 Usage:
-    export GROQ_API_KEY=gsk_...
     python -m evals.run
     # or with a different model:
     EVAL_MODEL=llama-3.1-8b-instant python -m evals.run
+
+Reads GROQ_API_KEY from .env or shell.
 """
 
 import os
@@ -14,15 +15,12 @@ import sys
 import time
 from pathlib import Path
 
-# allow running as `python evals/run.py` from project root
 ROOT = Path(__file__).resolve().parent.parent
 sys.path.insert(0, str(ROOT))
 
-try:
-    from dotenv import load_dotenv
-    load_dotenv(ROOT / ".env")
-except ImportError:
-    pass
+from evals._shared import get_groq_client, load_env, with_retry  # noqa: E402
+
+load_env()
 
 from prompts import SYSTEM_PROMPT  # noqa: E402
 from evals.cases import CASES  # noqa: E402
@@ -35,16 +33,18 @@ SAVE_DIR = ROOT / "evals" / "outputs"
 
 
 def call_model(client, prompt):
-    response = client.chat.completions.create(
-        model=MODEL,
-        messages=[
-            {"role": "system", "content": SYSTEM_PROMPT},
-            {"role": "user", "content": prompt},
-        ],
-        temperature=TEMPERATURE,
-        max_tokens=MAX_TOKENS,
-    )
-    return response.choices[0].message.content
+    def _do():
+        return client.chat.completions.create(
+            model=MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": prompt},
+            ],
+            temperature=TEMPERATURE,
+            max_tokens=MAX_TOKENS,
+        )
+
+    return with_retry(_do).choices[0].message.content
 
 
 def score(text, case):
@@ -59,19 +59,7 @@ def score(text, case):
 
 
 def main():
-    key = os.getenv("GROQ_API_KEY")
-    if not key:
-        print("ERROR: GROQ_API_KEY not set.")
-        print("Get a free key at https://console.groq.com/keys")
-        sys.exit(2)
-
-    try:
-        from groq import Groq
-    except ImportError:
-        print("ERROR: groq SDK not installed. Run: pip install -r requirements.txt")
-        sys.exit(2)
-
-    client = Groq(api_key=key)
+    client = get_groq_client()
     SAVE_DIR.mkdir(exist_ok=True)
 
     print(f"Running {len(CASES)} eval cases on model: {MODEL}\n")
