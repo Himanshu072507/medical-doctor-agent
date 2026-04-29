@@ -1,8 +1,10 @@
-# 🩺 Symptom Triage Helper
+# 🩺 Medical Symptoms Assessment
 
 A localhost-only, structured-intake symptom triage assistant built with Streamlit. BYOK (bring your own Groq or Gemini key) — no server-side keys, nothing logged remotely.
 
 > ⚠️ **Informational only — not medical advice.** This tool helps you organize symptoms and decide whether to seek care. It cannot diagnose you. For emergencies, call your local emergency number.
+
+<img width="1470" height="834" alt="image" src="https://github.com/user-attachments/assets/dae4f282-9008-427c-8cf0-1c83c57a4aae" />
 
 ## What it does
 
