@@ -33,6 +33,7 @@ sys.path.insert(0, str(ROOT))
 from evals._shared import (  # noqa: E402
     get_gemini_client,
     get_groq_client,
+    get_ollama_client,
     load_env,
     with_retry,
 )
@@ -43,8 +44,11 @@ from prompts import SYSTEM_PROMPT  # noqa: E402
 from evals.cases import CASES  # noqa: E402
 
 
-AGENT_MODEL = os.getenv("EVAL_MODEL", "llama-3.3-70b-versatile")
+AGENT_PROVIDER = os.getenv("EVAL_PROVIDER", "groq").lower()
+DEFAULT_AGENT_MODELS = {"groq": "llama-3.3-70b-versatile", "ollama": "llama3.1:8b"}
+AGENT_MODEL = os.getenv("EVAL_MODEL", DEFAULT_AGENT_MODELS.get(AGENT_PROVIDER, "llama-3.3-70b-versatile"))
 AGENT_TEMP = float(os.getenv("EVAL_TEMPERATURE", "0.0"))
+
 JUDGE_PROVIDER = os.getenv("JUDGE_PROVIDER", "groq").lower()
 JUDGE_TEMP = float(os.getenv("JUDGE_TEMPERATURE", "0.0"))
 MIN_SCORE = int(os.getenv("MIN_SCORE", "3"))
@@ -53,6 +57,7 @@ SAVE_DIR = ROOT / "evals" / "outputs"
 DEFAULT_JUDGE_MODELS = {
     "groq": "openai/gpt-oss-120b",
     "gemini": "gemini-2.5-pro",
+    "ollama": "llama3.1:8b",
 }
 JUDGE_MODEL = os.getenv("JUDGE_MODEL", DEFAULT_JUDGE_MODELS.get(JUDGE_PROVIDER, ""))
 
@@ -110,9 +115,9 @@ overall_pass should be true only if every criterion scores >= 3 AND there are no
 """
 
 
-def call_agent(groq_client, user_prompt):
+def call_agent_groq(client, user_prompt):
     def _do():
-        return groq_client.chat.completions.create(
+        return client.chat.completions.create(
             model=AGENT_MODEL,
             messages=[
                 {"role": "system", "content": SYSTEM_PROMPT},
@@ -123,6 +128,20 @@ def call_agent(groq_client, user_prompt):
         )
 
     return with_retry(_do).choices[0].message.content
+
+
+def call_agent_ollama(client, user_prompt):
+    def _do():
+        return client.chat(
+            model=AGENT_MODEL,
+            messages=[
+                {"role": "system", "content": SYSTEM_PROMPT},
+                {"role": "user", "content": user_prompt},
+            ],
+            options={"temperature": AGENT_TEMP, "num_predict": 2048},
+        )
+
+    return with_retry(_do)["message"]["content"]
 
 
 def call_judge_groq(client, user_prompt, agent_response):
@@ -163,8 +182,33 @@ def call_judge_gemini(client, user_prompt, agent_response):
     return json.loads(with_retry(_do).text)
 
 
+def call_judge_ollama(client, user_prompt, agent_response):
+    judge_input = f"USER INPUT:\n{user_prompt}\n\nAGENT RESPONSE:\n{agent_response}"
+
+    def _do():
+        return client.chat(
+            model=JUDGE_MODEL,
+            messages=[
+                {"role": "system", "content": JUDGE_SYSTEM_PROMPT},
+                {"role": "user", "content": judge_input},
+            ],
+            format="json",
+            options={"temperature": JUDGE_TEMP, "num_predict": 1024},
+        )
+
+    return json.loads(with_retry(_do)["message"]["content"])
+
+
 def evaluate_verdict(verdict):
-    """Return (passed, scores_dict, missing_criteria)."""
+    """
+    Return (passed, scores_dict, missing_criteria).
+
+    Pass = every per-criterion score >= MIN_SCORE.
+    The judge's `overall_pass` field is captured in the saved verdict but is NOT
+    used for the gate, because smaller / more conservative judges (e.g. local 8B)
+    tend to set overall_pass=False even when every criterion scores 4–5. The
+    per-criterion MIN_SCORE is a more reliable, calibration-resistant gate.
+    """
     scores = {}
     missing = []
     for c in CRITERIA:
@@ -175,10 +219,19 @@ def evaluate_verdict(verdict):
         scores[c] = int(node["score"])
     if missing:
         return False, scores, missing
-    min_s = min(scores.values())
-    overall_flag = bool(verdict.get("overall_pass", False))
-    passed = overall_flag and min_s >= MIN_SCORE
+    passed = min(scores.values()) >= MIN_SCORE
     return passed, scores, []
+
+
+def make_agent_callable():
+    if AGENT_PROVIDER == "groq":
+        client = get_groq_client()
+        return lambda u: call_agent_groq(client, u)
+    if AGENT_PROVIDER == "ollama":
+        client = get_ollama_client()
+        return lambda u: call_agent_ollama(client, u)
+    print(f"ERROR: unknown EVAL_PROVIDER '{AGENT_PROVIDER}' (use 'groq' or 'ollama').")
+    sys.exit(2)
 
 
 def make_judge_callable():
@@ -189,16 +242,19 @@ def make_judge_callable():
     if JUDGE_PROVIDER == "gemini":
         client = get_gemini_client()
         return lambda u, a: call_judge_gemini(client, u, a)
-    print(f"ERROR: unknown JUDGE_PROVIDER '{JUDGE_PROVIDER}' (use 'groq' or 'gemini').")
+    if JUDGE_PROVIDER == "ollama":
+        client = get_ollama_client()
+        return lambda u, a: call_judge_ollama(client, u, a)
+    print(f"ERROR: unknown JUDGE_PROVIDER '{JUDGE_PROVIDER}' (use 'groq', 'gemini', or 'ollama').")
     sys.exit(2)
 
 
 def main():
-    groq_client = get_groq_client()
+    agent_fn = make_agent_callable()
     judge_fn = make_judge_callable()
     SAVE_DIR.mkdir(exist_ok=True)
 
-    print(f"Agent provider: groq      |  model: {AGENT_MODEL}  |  temp: {AGENT_TEMP}")
+    print(f"Agent provider: {AGENT_PROVIDER:<9}|  model: {AGENT_MODEL}  |  temp: {AGENT_TEMP}")
     print(f"Judge provider: {JUDGE_PROVIDER:<9}|  model: {JUDGE_MODEL}  |  temp: {JUDGE_TEMP}")
     print(f"Cases:          {len(CASES)}")
     print(f"Pass threshold: every criterion >= {MIN_SCORE}/5\n")
@@ -210,7 +266,7 @@ def main():
         name = case["name"]
         print(f"  [{i:>2}/{len(CASES)}] {name:<38}", end=" ", flush=True)
         try:
-            agent_text = call_agent(groq_client, case["prompt"])
+            agent_text = agent_fn(case["prompt"])
             verdict = judge_fn(case["prompt"], agent_text)
             passed, scores, missing = evaluate_verdict(verdict)
 

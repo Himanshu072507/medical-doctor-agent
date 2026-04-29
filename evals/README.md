@@ -36,11 +36,26 @@ Note: a separate **crisis pre-check** in `app.py` (see `CRISIS_PATTERN`) interce
 
 ```bash
 # Make sure GROQ_API_KEY is in .env (and GEMINI_API_KEY if using Gemini)
-python -m evals.run                            # rule-based
-python -m evals.judge                          # LLM judge (Groq)
-JUDGE_PROVIDER=gemini python -m evals.judge    # LLM judge (Gemini)
-python -m evals.agreement                      # both judges, agreement report
+python -m evals.run                            # rule-based, Groq agent
+EVAL_PROVIDER=ollama python -m evals.run       # rule-based, local Ollama agent
+
+python -m evals.judge                          # LLM judge (Groq agent + Groq judge)
+JUDGE_PROVIDER=gemini python -m evals.judge    # cross-provider judge (Gemini)
+EVAL_PROVIDER=ollama JUDGE_PROVIDER=ollama \
+  python -m evals.judge                        # fully local — no quotas
+
+python -m evals.agreement                      # both Groq + Gemini judges
 ```
+
+### Providers
+
+| Provider | Set via | Default model | Needs |
+|---|---|---|---|
+| Groq | `EVAL_PROVIDER=groq` (default) or `JUDGE_PROVIDER=groq` | `llama-3.3-70b-versatile` (agent), `openai/gpt-oss-120b` (judge) | `GROQ_API_KEY` |
+| Gemini | `JUDGE_PROVIDER=gemini` (judge only) | `gemini-2.5-pro` | `GEMINI_API_KEY` |
+| Ollama | `EVAL_PROVIDER=ollama` or `JUDGE_PROVIDER=ollama` | `llama3.1:8b` | local Ollama server + model pulled |
+
+Ollama is the recommended fallback when Groq's daily TPD is exhausted, or for fully-offline runs.
 
 ### Rule-based runner (`evals.run`)
 

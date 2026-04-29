@@ -54,6 +54,17 @@ def get_gemini_client():
     return genai.Client(api_key=key)
 
 
+def get_ollama_client():
+    """Return an ollama Client. Assumes a local Ollama server is running."""
+    try:
+        import ollama
+    except ImportError:
+        print("ERROR: ollama SDK not installed. Run: pip install -r requirements.txt")
+        sys.exit(2)
+    host = os.getenv("OLLAMA_HOST", "http://localhost:11434")
+    return ollama.Client(host=host)
+
+
 def with_retry(fn, max_attempts=4):
     """Retry an LLM call on Groq 429 (rate limit) with exponential backoff."""
     for attempt in range(max_attempts):

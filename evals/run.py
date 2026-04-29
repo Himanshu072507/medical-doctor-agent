@@ -22,6 +22,7 @@ sys.path.insert(0, str(ROOT))
 
 from evals._shared import (  # noqa: E402
     get_groq_client,
+    get_ollama_client,
     load_env,
     parse_sections,
     with_retry,
@@ -33,26 +34,59 @@ from prompts import SYSTEM_PROMPT  # noqa: E402
 from evals.cases import CASES  # noqa: E402
 
 
-MODEL = os.getenv("EVAL_MODEL", "llama-3.3-70b-versatile")
+PROVIDER = os.getenv("EVAL_PROVIDER", "groq").lower()
+DEFAULT_MODELS = {"groq": "llama-3.3-70b-versatile", "ollama": "llama3.1:8b"}
+MODEL = os.getenv("EVAL_MODEL", DEFAULT_MODELS.get(PROVIDER, "llama-3.3-70b-versatile"))
 TEMPERATURE = float(os.getenv("EVAL_TEMPERATURE", "0.0"))  # deterministic by default
 MAX_TOKENS = int(os.getenv("EVAL_MAX_TOKENS", "2048"))
 RUNS = int(os.getenv("EVAL_RUNS", "1"))
 SAVE_DIR = ROOT / "evals" / "outputs"
 
 
-def call_model(client, prompt):
-    def _do():
-        return client.chat.completions.create(
-            model=MODEL,
-            messages=[
-                {"role": "system", "content": SYSTEM_PROMPT},
-                {"role": "user", "content": prompt},
-            ],
-            temperature=TEMPERATURE,
-            max_tokens=MAX_TOKENS,
-        )
+def make_caller():
+    """Return (client, call_model_fn) tuple based on EVAL_PROVIDER."""
+    if PROVIDER == "groq":
+        client = get_groq_client()
 
-    return with_retry(_do).choices[0].message.content
+        def call_model(prompt):
+            def _do():
+                return client.chat.completions.create(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    temperature=TEMPERATURE,
+                    max_tokens=MAX_TOKENS,
+                )
+
+            return with_retry(_do).choices[0].message.content
+
+        return client, call_model
+
+    if PROVIDER == "ollama":
+        client = get_ollama_client()
+
+        def call_model(prompt):
+            def _do():
+                return client.chat(
+                    model=MODEL,
+                    messages=[
+                        {"role": "system", "content": SYSTEM_PROMPT},
+                        {"role": "user", "content": prompt},
+                    ],
+                    options={
+                        "temperature": TEMPERATURE,
+                        "num_predict": MAX_TOKENS,
+                    },
+                )
+
+            return with_retry(_do)["message"]["content"]
+
+        return client, call_model
+
+    print(f"ERROR: unknown EVAL_PROVIDER '{PROVIDER}' (use 'groq' or 'ollama').")
+    sys.exit(2)
 
 
 def score(text, case):
@@ -81,14 +115,14 @@ def score(text, case):
     return failures
 
 
-def run_once(client, run_id):
+def run_once(call_model_fn, run_id):
     SAVE_DIR.mkdir(exist_ok=True)
     results = []
     for i, case in enumerate(CASES, 1):
         name = case["name"]
         print(f"  [{i:>2}/{len(CASES)}] {name:<38}", end=" ", flush=True)
         try:
-            text = call_model(client, case["prompt"])
+            text = call_model_fn(case["prompt"])
             failures = score(text, case)
             suffix = f"_run{run_id}" if RUNS > 1 else ""
             (SAVE_DIR / f"{name}{suffix}.md").write_text(
@@ -105,8 +139,8 @@ def run_once(client, run_id):
 
 
 def main():
-    client = get_groq_client()
-    print(f"Model: {MODEL} | temperature: {TEMPERATURE} | runs: {RUNS}\n")
+    _client, call_model_fn = make_caller()
+    print(f"Provider: {PROVIDER} | model: {MODEL} | temp: {TEMPERATURE} | runs: {RUNS}\n")
 
     t0 = time.time()
     pass_counts = {c["name"]: 0 for c in CASES}
@@ -114,7 +148,7 @@ def main():
     for r in range(1, RUNS + 1):
         if RUNS > 1:
             print(f"── Run {r}/{RUNS} ──")
-        results = run_once(client, r)
+        results = run_once(call_model_fn, r)
         for name, failures in results:
             if not failures:
                 pass_counts[name] += 1
