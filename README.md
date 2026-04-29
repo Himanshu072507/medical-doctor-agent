@@ -40,14 +40,14 @@ Open <http://localhost:8501>.
 
 ### API keys
 
-Recommended: a `.env` file in the project root.
+The Streamlit app uses **strict BYOK from the UI**: paste your key into the sidebar at <http://localhost:8501>. The key lives in the browser session only — it is **not** read from `.env`, environment variables, or any persistent store, and the app does not save it to disk.
+
+If you want to run the eval CLI scripts (`evals/run.py`, `evals/judge.py`, `evals/agreement.py`) they DO read from `.env`:
 
 ```bash
 cp .env.example .env
-# edit .env and set GROQ_API_KEY=... (and optionally GEMINI_API_KEY=...)
+# edit .env and uncomment GROQ_API_KEY / GEMINI_API_KEY
 ```
-
-Both keys are auto-loaded by the app and the eval runners. If `.env` is absent, you can also paste a key directly in the sidebar.
 
 Free keys:
 - **Groq** (recommended, fastest): <https://console.groq.com/keys>

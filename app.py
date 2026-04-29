@@ -1,17 +1,17 @@
 """
 Symptom Triage Helper (BYOK)
 A localhost-only informational triage assistant. Not a doctor, not a substitute for one.
+
+Strict BYOK: API keys are entered in the UI only. They are kept in Streamlit
+session state for the lifetime of the browser tab and are not read from the
+environment, .env, or any other persistent store.
 """
 
-import os
 import re
 
 import streamlit as st
-from dotenv import load_dotenv
 
 from prompts import SYSTEM_PROMPT
-
-load_dotenv()
 
 st.set_page_config(
     page_title="Symptom Triage Helper",
@@ -142,7 +142,7 @@ with st.sidebar:
     st.title("🩺 Symptom Triage Helper")
     st.caption("Informational only — not medical advice")
 
-    st.markdown("### 🔑 API Configuration")
+    st.markdown("### 🔑 API Key (required)")
     provider = st.selectbox(
         "Provider",
         ["Groq (recommended)", "Google Gemini"],
@@ -150,8 +150,6 @@ with st.sidebar:
     )
 
     if provider.startswith("Groq"):
-        env_key = os.getenv("GROQ_API_KEY", "")
-        env_var_name = "GROQ_API_KEY"
         get_key_url = "https://console.groq.com/keys"
         models = [
             "llama-3.3-70b-versatile",
@@ -160,25 +158,23 @@ with st.sidebar:
         ]
         placeholder = "gsk_..."
     else:
-        env_key = os.getenv("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY") or ""
-        env_var_name = "GEMINI_API_KEY"
         get_key_url = "https://aistudio.google.com/apikey"
         models = ["gemini-2.5-flash", "gemini-2.5-pro", "gemini-2.0-flash"]
         placeholder = "AIza..."
 
-    if env_key:
-        st.success(f"✓ Key loaded from `.env` (`{env_var_name}`)")
-        api_key = env_key
-    else:
-        api_key = st.text_input(
-            f"{provider.split(' ')[0]} API Key",
-            type="password",
-            placeholder=placeholder,
-            help=f"Tip: put `{env_var_name}=...` in `.env` to skip this field.",
-        )
+    api_key = st.text_input(
+        f"{provider.split(' ')[0]} API Key",
+        type="password",
+        placeholder=placeholder,
+        help="Your key stays in this browser session only. It is not stored.",
+    )
 
     model = st.selectbox("Model", models, index=0)
     st.markdown(f"[Get a free API key →]({get_key_url})")
+    st.caption(
+        "🔒 Your key is held only in this Streamlit session and is sent directly "
+        "to the provider you select. Close the tab or click 'New consultation' to clear it."
+    )
 
     st.divider()
     if st.button("🔄 New consultation", use_container_width=True):
